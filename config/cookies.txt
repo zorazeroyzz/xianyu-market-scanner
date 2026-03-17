@@ -1,7 +1,22 @@
 # 闲鱼 Cookie 池
-# 每行一个 Cookie 字符串
-# 获取方法：手机浏览器访问 h5.m.goofish.com → 登录 → 开发者工具 → Network → 复制 Cookie
-# 示例格式（以下为占位符，请替换为真实 Cookie）：
+# 每行一个 Cookie 字符串，支持多 Cookie 轮转降低风控
 #
-# _m_h5_tk=xxxx;_m_h5_tk_enc=yyyy;cookie2=zzzz;sgcookie=...
-# _m_h5_tk=aaaa;_m_h5_tk_enc=bbbb;cookie2=cccc;sgcookie=...
+# ── 获取方法（3 步）──
+#
+# 1. 浏览器打开 https://www.goofish.com 并登录
+# 2. F12 → Application → Cookies → www.goofish.com
+# 3. 复制以下关键字段，用分号连接成一行粘贴到下方：
+#    _m_h5_tk=xxx; _m_h5_tk_enc=yyy; cookie2=zzz; sgcookie=...
+#
+#    或者：F12 → Network → 任意请求 → Headers → Cookie 整行复制
+#
+# ── 注意事项 ──
+#
+# - Cookie 有效期约 24-48 小时，失效后需重新获取
+# - 多个 Cookie 可降低单账号风控风险（建议 2-3 个）
+# - 以 # 开头的行为注释
+#
+# ── 示例（请替换为真实 Cookie）──
+#
+# _m_h5_tk=abc123_1234567890;_m_h5_tk_enc=def456;cookie2=ghi789;sgcookie=jkl012
+# _m_h5_tk=mno345_9876543210;_m_h5_tk_enc=pqr678;cookie2=stu901;sgcookie=vwx234

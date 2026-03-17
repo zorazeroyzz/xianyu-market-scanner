@@ -1,6 +1,6 @@
 """
-工具函数：请求封装、User-Agent 轮转、解析器
-闲鱼 H5 公开搜索接口 — 无需登录/Cookie
+工具函数：Playwright 浏览器采集、DOM 解析、数据存储
+闲鱼搜索需要登录态，通过 Cookie 注入 + Playwright 无头浏览器实现
 """
 import os
 import json
@@ -12,68 +12,110 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
-
-import requests
-from fake_useragent import UserAgent
 
 logger = logging.getLogger("xianyu-scanner")
 
 
-# ────────────────────────── HTTP 客户端 ──────────────────────────
+# ────────────────────────── Cookie 管理 ──────────────────────────
+
+class CookiePool:
+    """从文件加载 Cookie 字符串，支持多 Cookie 轮转"""
+
+    def __init__(self, cookie_file: str = "config/cookies.txt"):
+        self.cookies = []
+        self._index = 0
+        p = Path(cookie_file)
+        if p.exists():
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    self.cookies.append(line)
+            logger.info(f"已加载 {len(self.cookies)} 个 Cookie")
+        else:
+            logger.warning(f"Cookie 文件不存在: {cookie_file}")
+
+    @property
+    def available(self) -> bool:
+        return len(self.cookies) > 0
+
+    def next(self) -> str:
+        """轮转获取下一个 Cookie"""
+        if not self.cookies:
+            return ""
+        cookie = self.cookies[self._index % len(self.cookies)]
+        self._index += 1
+        return cookie
+
+    def to_playwright_cookies(self, cookie_str: str) -> list:
+        """将 Cookie 字符串转换为 Playwright 格式"""
+        pw_cookies = []
+        for part in cookie_str.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, _, value = part.partition("=")
+                pw_cookies.append({
+                    "name": name.strip(),
+                    "value": value.strip(),
+                    "domain": ".goofish.com",
+                    "path": "/",
+                })
+        return pw_cookies
+
+
+# ────────────────────────── 浏览器采集客户端 ──────────────────────────
 
 class XianyuClient:
     """
-    闲鱼公开搜索接口封装 — 无需登录
+    闲鱼搜索采集客户端 — 基于 Playwright + Cookie
 
-    策略说明：
-    1. 主通道：闲鱼 H5 搜索页面直接抓取（SSR 渲染，HTML 内嵌 JSON）
-    2. 备用通道：goofish 公开 API（部分接口无需鉴权）
-    3. 兜底通道：通过搜索引擎 site:goofish.com 间接采集
+    工作流程：
+    1. 启动 Chromium 无头浏览器
+    2. 注入用户提供的 Cookie（登录态）
+    3. 访问搜索页，等待商品列表渲染
+    4. 从 DOM 提取结构化商品数据
     """
 
-    # H5 搜索页（SSR，HTML 内含商品 JSON 数据）
-    H5_SEARCH_URL = "https://h5.m.goofish.com/search?keyword={keyword}&spm=a21ybx.search.result.0&page={page}"
+    SEARCH_URL = "https://www.goofish.com/search?keyword={keyword}&spm=a21ybx.search.result.0"
 
-    # 公开 AJAX 搜索接口（部分场景可直接访问）
-    AJAX_SEARCH_URL = "https://h5api.m.goofish.com/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/"
-
-    def __init__(self, proxy_pool: Optional[list] = None):
+    def __init__(self, cookie_pool: Optional[CookiePool] = None, proxy_pool: Optional[list] = None):
+        self.cookie_pool = cookie_pool
         self.proxy_pool = proxy_pool or []
-        self.ua = UserAgent(browsers=["chrome", "edge", "safari"], os=["windows", "macos", "android", "ios"])
-        self.session = requests.Session()
         self._request_count = 0
         self._last_request_time = 0
+        self._browser = None
+        self._context = None
+        self._playwright = None
 
-    def _get_headers(self) -> dict:
-        """构造合理的浏览器请求头"""
-        return {
-            "User-Agent": self.ua.random,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        }
+    def _ensure_browser(self):
+        """懒加载浏览器实例"""
+        if self._browser is not None:
+            return
 
-    def _get_json_headers(self) -> dict:
-        return {
-            "User-Agent": self.ua.random,
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Referer": "https://www.goofish.com/",
-            "Origin": "https://www.goofish.com",
-        }
+        from playwright.sync_api import sync_playwright
+        self._playwright = sync_playwright().start()
 
-    def _get_proxy(self) -> Optional[dict]:
-        if not self.proxy_pool:
-            return None
-        proxy = random.choice(self.proxy_pool)
-        return {"http": proxy, "https": proxy}
+        launch_args = {"headless": True}
+        if self.proxy_pool:
+            proxy = random.choice(self.proxy_pool)
+            launch_args["proxy"] = {"server": proxy}
+
+        self._browser = self._playwright.chromium.launch(**launch_args)
+        self._context = self._browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 900},
+            locale="zh-CN",
+        )
+
+        # 注入 Cookie
+        if self.cookie_pool and self.cookie_pool.available:
+            cookie_str = self.cookie_pool.next()
+            pw_cookies = self.cookie_pool.to_playwright_cookies(cookie_str)
+            if pw_cookies:
+                self._context.add_cookies(pw_cookies)
+                logger.info(f"已注入 {len(pw_cookies)} 个 Cookie 字段")
 
     def _throttle(self, delay_range: tuple = (2, 5)):
-        """请求节流：随机延迟"""
+        """请求节流"""
         elapsed = time.time() - self._last_request_time
         min_delay = delay_range[0]
         if elapsed < min_delay:
@@ -84,301 +126,214 @@ class XianyuClient:
 
     def search(self, keyword: str, page: int = 1, page_size: int = 20) -> dict:
         """
-        执行闲鱼搜索（无需登录）
-
-        尝试顺序：
-        1. PC 版搜索页面（SSR HTML 内嵌数据）
-        2. H5 搜索页面
-        3. 公开 AJAX 接口
+        执行闲鱼搜索
 
         返回:
         {
             "success": bool,
             "items": [...],
             "total": int,
-            "source": str  # 数据来源标识
+            "source": str
         }
         """
-        # 尝试 PC 版搜索（goofish.com 无登录可搜）
-        result = self._search_pc_web(keyword, page)
-        if result["success"] and result["items"]:
-            return result
-
-        # 尝试 H5 页面抓取
-        result = self._search_h5_ssr(keyword, page)
-        if result["success"] and result["items"]:
-            return result
-
-        # 尝试 AJAX 接口
-        result = self._search_ajax(keyword, page, page_size)
-        return result
-
-    def _search_pc_web(self, keyword: str, page: int = 1) -> dict:
-        """通过 PC 版 goofish.com 搜索页抓取（公开访问）"""
+        self._ensure_browser()
         self._throttle()
 
-        url = f"https://www.goofish.com/search?keyword={quote(keyword)}&page={page}"
+        url = self.SEARCH_URL.format(keyword=keyword)
+        if page > 1:
+            url += f"&page={page}"
 
         try:
-            resp = self.session.get(
-                url,
-                headers=self._get_headers(),
-                proxies=self._get_proxy(),
-                timeout=15,
-            )
+            pw_page = self._context.new_page()
             self._request_count += 1
 
-            if resp.status_code != 200:
-                logger.debug(f"PC 搜索返回 HTTP {resp.status_code}")
-                return {"success": False, "items": [], "total": 0, "source": "pc_web"}
+            # 导航到搜索页
+            pw_page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            items = self._parse_html_items(resp.text)
-            return {
-                "success": len(items) > 0,
-                "items": items,
-                "total": len(items),
-                "source": "pc_web",
-            }
-
-        except requests.RequestException as e:
-            logger.debug(f"PC 搜索异常: {e}")
-            return {"success": False, "items": [], "total": 0, "source": "pc_web", "error": str(e)}
-
-    def _search_h5_ssr(self, keyword: str, page: int = 1) -> dict:
-        """通过 H5 搜索页 SSR 数据抓取"""
-        self._throttle()
-
-        url = self.H5_SEARCH_URL.format(keyword=quote(keyword), page=page)
-
-        try:
-            headers = self._get_headers()
-            headers["User-Agent"] = self.ua["google chrome"]  # 模拟移动端
-            resp = self.session.get(
-                url,
-                headers=headers,
-                proxies=self._get_proxy(),
-                timeout=15,
-            )
-            self._request_count += 1
-
-            if resp.status_code != 200:
-                return {"success": False, "items": [], "total": 0, "source": "h5_ssr"}
-
-            items = self._parse_html_items(resp.text)
-            return {
-                "success": len(items) > 0,
-                "items": items,
-                "total": len(items),
-                "source": "h5_ssr",
-            }
-
-        except requests.RequestException as e:
-            logger.debug(f"H5 SSR 异常: {e}")
-            return {"success": False, "items": [], "total": 0, "source": "h5_ssr", "error": str(e)}
-
-    def _search_ajax(self, keyword: str, page: int = 1, page_size: int = 20) -> dict:
-        """通过公开 AJAX 接口搜索"""
-        self._throttle()
-
-        params = {
-            "jsv": "2.7.2",
-            "appKey": "12574478",
-            "api": "mtop.taobao.idlemtopsearch.pc.search",
-            "v": "1.0",
-            "timeout": "20000",
-            "type": "jsonp",
-            "dataType": "jsonp",
-            "callback": f"mtopjsonp{random.randint(1,9)}",
-        }
-
-        data = {
-            "keyword": keyword,
-            "pageNumber": str(page),
-            "pageSize": str(page_size),
-        }
-
-        try:
-            resp = self.session.get(
-                self.AJAX_SEARCH_URL,
-                params={**params, "data": json.dumps(data, ensure_ascii=False)},
-                headers=self._get_json_headers(),
-                proxies=self._get_proxy(),
-                timeout=15,
-            )
-            self._request_count += 1
-
-            if resp.status_code != 200:
-                return {"success": False, "items": [], "total": 0, "source": "ajax"}
-
-            # 解析 JSONP
-            text = resp.text
-            json_match = re.search(r'\((\{.*\})\)', text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group(1))
-                items = self._extract_api_items(data)
-                return {
-                    "success": len(items) > 0,
-                    "items": items,
-                    "total": len(items),
-                    "source": "ajax",
-                }
-
-            return {"success": False, "items": [], "total": 0, "source": "ajax", "error": "无法解析 JSONP"}
-
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            logger.debug(f"AJAX 异常: {e}")
-            return {"success": False, "items": [], "total": 0, "source": "ajax", "error": str(e)}
-
-    def _parse_html_items(self, html: str) -> list:
-        """
-        从 SSR HTML 中提取商品数据
-
-        闲鱼页面通常在 <script> 中嵌入 __INITIAL_STATE__ 或 window.__data__ JSON
-        """
-        items = []
-
-        # 尝试提取 __INITIAL_STATE__
-        patterns = [
-            r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});?\s*</script>',
-            r'window\.__NEXT_DATA__\s*=\s*(\{.*?\});?\s*</script>',
-            r'window\.__data__\s*=\s*(\{.*?\});?\s*</script>',
-            r'"resultList"\s*:\s*(\[.*?\])\s*[,}]',
-            r'"itemList"\s*:\s*(\[.*?\])\s*[,}]',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, html, re.DOTALL)
-            if match:
+            # 等待商品列表渲染（尝试多个可能的选择器）
+            loaded = False
+            for selector in [
+                'a[href*="/item/"]',
+                '[class*="feeds-item"]',
+                '[class*="ItemCard"]',
+                '[class*="search-content"]',
+            ]:
                 try:
-                    data = json.loads(match.group(1))
-                    items = self._walk_and_extract(data)
-                    if items:
-                        break
-                except json.JSONDecodeError:
+                    pw_page.wait_for_selector(selector, timeout=8000)
+                    loaded = True
+                    break
+                except:
                     continue
 
-        # 兜底：用正则直接提取价格和标题
-        if not items:
-            items = self._regex_extract(html)
+            if not loaded:
+                # 检查是否遇到登录墙
+                if self._check_login_wall(pw_page):
+                    logger.warning("遇到登录墙 — Cookie 可能已过期，请更新 config/cookies.txt")
+                    pw_page.close()
+                    return {"success": False, "items": [], "total": 0, "source": "playwright",
+                            "error": "需要登录，请更新 Cookie"}
 
-        return items
+                # 再等一会
+                pw_page.wait_for_timeout(3000)
 
-    def _walk_and_extract(self, data, depth=0) -> list:
-        """递归遍历 JSON 结构，找到商品列表"""
-        if depth > 8:
-            return []
+            # 关闭可能的弹窗
+            self._dismiss_popups(pw_page)
 
-        items = []
+            # 滚动页面加载更多
+            self._scroll_page(pw_page)
 
-        if isinstance(data, list):
-            for entry in data:
-                if isinstance(entry, dict) and any(k in entry for k in ["itemId", "title", "price", "soldPrice"]):
-                    item = self._normalize_item(entry)
-                    if item.get("title"):
-                        items.append(item)
-                else:
-                    items.extend(self._walk_and_extract(entry, depth + 1))
+            # 从 DOM 提取商品
+            items = self._extract_items_from_dom(pw_page)
 
-        elif isinstance(data, dict):
-            # 检查当前层是否是商品
-            if "itemId" in data and "title" in data:
-                item = self._normalize_item(data)
-                if item.get("title"):
-                    return [item]
+            pw_page.close()
 
-            # 搜索可能包含列表的 key
-            list_keys = ["resultList", "itemList", "items", "list", "data", "props", "pageProps", "searchResult"]
-            for key in list_keys:
-                if key in data:
-                    found = self._walk_and_extract(data[key], depth + 1)
-                    if found:
-                        items.extend(found)
+            return {
+                "success": len(items) > 0,
+                "items": items,
+                "total": len(items),
+                "source": "playwright",
+            }
 
-            # 如果没找到，遍历所有值
-            if not items:
-                for v in data.values():
-                    if isinstance(v, (dict, list)):
-                        found = self._walk_and_extract(v, depth + 1)
-                        if found:
-                            items.extend(found)
-                            break  # 找到第一个有效列表就停
+        except Exception as e:
+            logger.warning(f"Playwright 采集异常: {e}")
+            try:
+                pw_page.close()
+            except:
+                pass
+            return {"success": False, "items": [], "total": 0, "source": "playwright", "error": str(e)}
 
-        return items
+    def _check_login_wall(self, pw_page) -> bool:
+        """检查是否遇到登录弹窗"""
+        try:
+            login_indicators = pw_page.query_selector_all(
+                '[class*="baxia-dialog"], [class*="login-dialog"], iframe[src*="login"]'
+            )
+            return len(login_indicators) > 0
+        except:
+            return False
 
-    def _regex_extract(self, html: str) -> list:
-        """兜底方案：用正则从 HTML 中提取商品信息"""
-        items = []
+    def _dismiss_popups(self, pw_page):
+        """关闭弹窗/遮罩"""
+        try:
+            pw_page.evaluate("""() => {
+                document.querySelectorAll('[class*="baxia"], [class*="login-dialog"], [class*="mask"]').forEach(el => el.remove());
+                document.querySelectorAll('iframe[src*="login"]').forEach(el => el.remove());
+            }""")
+        except:
+            pass
 
-        # 匹配商品卡片模式：标题 + 价格
-        title_price_pairs = re.findall(
-            r'title["\']?\s*[:=]\s*["\']([^"\']{4,80})["\'].*?'
-            r'(?:price|soldPrice)["\']?\s*[:=]\s*["\']?(\d+\.?\d*)',
-            html, re.DOTALL
-        )
+    def _scroll_page(self, pw_page, scrolls: int = 3):
+        """滚动页面触发懒加载"""
+        try:
+            for _ in range(scrolls):
+                pw_page.evaluate("window.scrollBy(0, 800)")
+                pw_page.wait_for_timeout(800)
+        except:
+            pass
 
-        for title, price in title_price_pairs:
-            # 过滤明显非商品标题
-            if any(skip in title.lower() for skip in ["script", "style", "function", "var ", "const "]):
-                continue
-            items.append({
-                "id": hashlib.md5(title.encode()).hexdigest()[:12],
-                "title": title.strip(),
-                "price": self._safe_float(price),
+    def _extract_items_from_dom(self, pw_page) -> list:
+        """从渲染后的 DOM 提取商品数据"""
+        items = pw_page.evaluate("""() => {
+            const results = [];
+            const seen = new Set();
+
+            // 查找所有商品链接
+            const links = document.querySelectorAll('a[href*="/item/"]');
+            links.forEach(link => {
+                const href = link.getAttribute('href') || '';
+                const match = href.match(/item[/?](?:id=)?(\\w+)/);
+                const itemId = match ? match[1] : '';
+                if (!itemId || seen.has(itemId)) return;
+                seen.add(itemId);
+
+                // 找到包含该链接的卡片容器
+                const card = link.closest('[class*="feeds-item"]')
+                           || link.closest('[class*="ItemCard"]')
+                           || link.closest('[class*="item-card"]')
+                           || link;
+
+                const text = (card.textContent || '').replace(/\\s+/g, ' ').trim();
+
+                // 提取价格（¥ 后面的数字）
+                const priceMatch = text.match(/[¥￥](\\d+\\.?\\d*)/);
+                const price = priceMatch ? parseFloat(priceMatch[1]) : 0;
+
+                // 提取 "想要" 数
+                const wantMatch = text.match(/(\\d+)\\s*人想要/);
+                const wantCount = wantMatch ? parseInt(wantMatch[1]) : 0;
+
+                // 提取标题（链接文本或卡片第一段有意义的文本）
+                let title = '';
+                const titleEl = card.querySelector('[class*="title"], [class*="Title"], h3, h4');
+                if (titleEl) {
+                    title = titleEl.textContent.trim();
+                }
+                if (!title) {
+                    // 取卡片文本的前80个字符作为标题
+                    title = text.substring(0, 80);
+                }
+
+                // 提取图片
+                const img = card.querySelector('img[src*="alicdn"], img[src*="goofish"]');
+                const imageUrl = img ? (img.getAttribute('src') || '') : '';
+
+                // 提取卖家信息
+                const sellerEl = card.querySelector('[class*="seller"], [class*="nick"], [class*="user"]');
+                const sellerName = sellerEl ? sellerEl.textContent.trim() : '';
+
+                if (title && title.length > 2) {
+                    results.push({
+                        id: itemId,
+                        title: title.substring(0, 120),
+                        price: price,
+                        want_count: wantCount,
+                        seller_name: sellerName.substring(0, 30),
+                        image_url: imageUrl,
+                        detail_url: 'https://www.goofish.com/item?id=' + itemId,
+                    });
+                }
+            });
+
+            return results;
+        }""")
+
+        # 补充字段并规范化
+        normalized = []
+        for raw in items:
+            normalized.append({
+                "id": raw.get("id", ""),
+                "title": raw.get("title", ""),
+                "price": float(raw.get("price", 0)),
                 "original_price": 0,
                 "sold_count": 0,
-                "want_count": 0,
+                "want_count": int(raw.get("want_count", 0)),
                 "view_count": 0,
                 "seller_id": "",
-                "seller_name": "",
+                "seller_name": raw.get("seller_name", ""),
                 "seller_credit": "",
                 "location": "",
-                "image_url": "",
-                "detail_url": "",
+                "image_url": raw.get("image_url", ""),
+                "detail_url": raw.get("detail_url", ""),
                 "publish_time": "",
                 "scraped_at": datetime.now().isoformat(),
             })
 
-        return items
+        return normalized
 
-    def _normalize_item(self, raw: dict) -> dict:
-        """将各种格式的原始数据统一为标准商品结构"""
-        item_id = str(raw.get("itemId", raw.get("id", raw.get("item_id", ""))))
-        return {
-            "id": item_id,
-            "title": raw.get("title", raw.get("item_title", "")),
-            "price": self._safe_float(raw.get("price", raw.get("soldPrice", raw.get("sold_price", "0")))),
-            "original_price": self._safe_float(raw.get("originalPrice", raw.get("original_price", "0"))),
-            "sold_count": self._safe_int(raw.get("soldCount", raw.get("sold_count", raw.get("commentCount", "0")))),
-            "want_count": self._safe_int(raw.get("wantCount", raw.get("want_count", raw.get("likeCount", "0")))),
-            "view_count": self._safe_int(raw.get("viewCount", raw.get("view_count", "0"))),
-            "seller_id": str(raw.get("sellerId", raw.get("userId", raw.get("seller_id", "")))),
-            "seller_name": raw.get("sellerNick", raw.get("nick", raw.get("seller_name", ""))),
-            "seller_credit": str(raw.get("sellerCredit", raw.get("credit", ""))),
-            "location": raw.get("area", raw.get("divisionName", raw.get("location", ""))),
-            "image_url": raw.get("picUrl", raw.get("mainPic", raw.get("pic_url", ""))),
-            "detail_url": f"https://www.goofish.com/item?id={item_id}" if item_id else "",
-            "publish_time": raw.get("publishTime", raw.get("publish_time", "")),
-            "scraped_at": datetime.now().isoformat(),
-        }
-
-    def _extract_api_items(self, data: dict) -> list:
-        """从 AJAX API 响应中提取商品"""
-        return self._walk_and_extract(data.get("data", data))
-
-    @staticmethod
-    def _safe_float(val) -> float:
+    def close(self):
+        """释放浏览器资源"""
         try:
-            return float(str(val).replace(",", "").replace("¥", "").replace("元", ""))
-        except (ValueError, TypeError):
-            return 0.0
+            if self._context:
+                self._context.close()
+            if self._browser:
+                self._browser.close()
+            if self._playwright:
+                self._playwright.stop()
+        except:
+            pass
 
-    @staticmethod
-    def _safe_int(val) -> int:
-        try:
-            s = str(val).replace(",", "").replace("+", "").replace("万", "0000")
-            return int(float(s))
-        except (ValueError, TypeError):
-            return 0
+    def __del__(self):
+        self.close()
 
 
 # ────────────────────────── 数据存储 ──────────────────────────
@@ -413,7 +368,7 @@ class DataStore:
         all_records = []
         for f in sorted(self.data_dir.glob("*.json")):
             if f.name.startswith("_"):
-                continue  # 跳过分析结果文件
+                continue
             try:
                 record = json.loads(f.read_text(encoding="utf-8"))
                 all_records.append(record)
