@@ -1,0 +1,7 @@
+# 闲鱼 Cookie 池
+# 每行一个 Cookie 字符串
+# 获取方法：手机浏览器访问 h5.m.goofish.com → 登录 → 开发者工具 → Network → 复制 Cookie
+# 示例格式（以下为占位符，请替换为真实 Cookie）：
+#
+# _m_h5_tk=xxxx;_m_h5_tk_enc=yyyy;cookie2=zzzz;sgcookie=...
+# _m_h5_tk=aaaa;_m_h5_tk_enc=bbbb;cookie2=cccc;sgcookie=...

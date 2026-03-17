@@ -1,0 +1,106 @@
+{
+  "scan_groups": {
+    "pokemon_trade": {
+      "label": "宝可梦改号/配种",
+      "track": "game",
+      "keywords": [
+        "宝可梦SV定制",
+        "宝可梦朱紫配种",
+        "宝可梦闪光",
+        "宝可梦六V",
+        "宝可梦代练",
+        "精灵宝可梦改",
+        "宝可梦竞技队伍",
+        "pokemon定制"
+      ]
+    },
+    "mahjong_soul": {
+      "label": "雀魂辅助/代打",
+      "track": "game",
+      "keywords": [
+        "雀魂代打",
+        "雀魂上分",
+        "雀魂段位",
+        "雀魂账号",
+        "麻将助手",
+        "雀魂雀圣"
+      ]
+    },
+    "blue_archive": {
+      "label": "蔚蓝档案代肝",
+      "track": "game",
+      "keywords": [
+        "蔚蓝档案代肝",
+        "蔚蓝档案代打",
+        "蔚蓝档案日常",
+        "BA代肝",
+        "碧蓝档案代刷"
+      ]
+    },
+    "elden_ring": {
+      "label": "法环Mod/存档",
+      "track": "game",
+      "keywords": [
+        "艾尔登法环存档",
+        "法环mod",
+        "法环代打",
+        "艾尔登法环全武器",
+        "法环DLC存档",
+        "法环夜之王"
+      ]
+    },
+    "ai_api": {
+      "label": "AI API中转/额度卡",
+      "track": "infra",
+      "keywords": [
+        "ChatGPT API",
+        "Claude API额度",
+        "AI编程助手",
+        "GPT4额度",
+        "AI接口",
+        "大模型API",
+        "AI代写代码"
+      ]
+    },
+    "ai_voice": {
+      "label": "AI语音定制/克隆",
+      "track": "visual",
+      "keywords": [
+        "AI语音定制",
+        "AI配音",
+        "语音克隆",
+        "AI有声书",
+        "TTS定制",
+        "AI声音克隆"
+      ]
+    },
+    "vtuber_digital": {
+      "label": "VTuber/数字人搭建",
+      "track": "visual",
+      "keywords": [
+        "虚拟主播搭建",
+        "数字人直播",
+        "AI虚拟人",
+        "Live2D定制",
+        "VTuber模型",
+        "AI直播",
+        "数字人带货"
+      ]
+    },
+    "acnh_trade": {
+      "label": "动森道具/改号",
+      "track": "game",
+      "keywords": [
+        "动物森友会道具",
+        "动森代刷",
+        "动森金币",
+        "动物之森改造"
+      ]
+    }
+  },
+  "settings": {
+    "max_pages_per_keyword": 5,
+    "delay_between_requests_sec": [2, 5],
+    "max_items_per_keyword": 100
+  }
+}
